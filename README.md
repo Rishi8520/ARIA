@@ -26,9 +26,8 @@ Submission window: June 10 – August 14, 2026 · Timeline: 6-week build, starte
 14. [How to Build and Flash](#14-how-to-build-and-flash)
 15. [Demo Script](#15-demo-script)
 16. [Judging Criteria Alignment](#16-judging-criteria-alignment)
-17. [Project Status / Roadmap](#17-project-status--roadmap)
-18. [Submission Checklist](#18-submission-checklist)
-19. [License](#19-license)
+17. [Submission Checklist](#18-submission-checklist)
+18. [License](#19-license)
 
 ---
 
@@ -404,22 +403,7 @@ Public GitHub repo (MIT/Apache 2.0 licensed), written project overview + setup i
 
 ---
 
-## 17. Project Status / Roadmap
-
-| Week | Original focus | Updated focus given ADS1263 pivot |
-|---|---|---|---|
-| 1 (Jul 5–11) | e² studio FSP setup, camera/LCD basics | Done, setup complete |
-| 2 (Jul 12–18) | IMU I2C integration | Pivoted — spent on ADS1263 SPI debug instead |
-| 3 (Jul 19–25) | Multi-model deployment package integration | ADS1263 hardware bring-up completed this week | 
-| 4 (Jul 26–Aug 1) | Runtime feature extraction | Build ADS1263 sampling buffer; start Edge Impulse data collection / model zoo training for Demo 1 |
-| 5 (Aug 2–8) | Deploy meta-controller, wire dispatch loop | Bring up ICM-20948 if arrived, in parallel integrate Demo 1 model zoo into firmware |
-| 6 (Aug 9–14) | Integration testing, demo video, docs | Finalize whichever demo set (2 or 3) is stable, record demo, prep benchmark charts, submit |
-
-[cite:1]
-
----
-
-## 18. Submission Checklist
+## 17. Submission Checklist
 
 - [ ] Public GitHub repo, MIT/Apache 2.0 license visible
 - [ ] Written project overview + setup instructions (this README)
