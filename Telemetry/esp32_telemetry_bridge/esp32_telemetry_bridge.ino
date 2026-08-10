@@ -32,8 +32,8 @@
 // ---------------------------------------------------------------------
 // CONFIG - edit these for your network
 // ---------------------------------------------------------------------
-const char* WIFI_SSID     = "YOURWIFINAME";
-const char* WIFI_PASSWORD = "WIFIPASSWORD";
+const char* WIFI_SSID     = "YOUR_WIFI_HERE";
+const char* WIFI_PASSWORD = "YOUR_PASSWORD_HERE";
 
 // UART pins used to talk to the RA8D1
 #define RA8D1_RX_PIN 16  // ESP32 receives here (connect to RA8D1 TX)
@@ -58,10 +58,11 @@ struct Reading {
   String  model;        // "fast" | "balanced" | "accurate"
   float   confidence;   // 0.0 - 1.0
   uint32_t latency_ms;
+  float voltage; 
   unsigned long ts;      // millis() when received
 };
 
-Reading latest = {"unknown", "unknown", 0.0f, 0, 0};
+Reading latest = {"unknown", "unknown", 0.0f, 0, 0.0f, 0};
 Reading history[HISTORY_LEN];
 int historyCount = 0;   // number of valid entries
 int historyHead  = 0;   // next write index (ring buffer)
@@ -89,7 +90,7 @@ void pushHistory(const Reading& r) {
 }
 
 // Parse one JSON line coming from the RA8D1 and update state.
-// Expected shape: {"mode":"vision","model":"fast","confidence":0.93,"latency_ms":7}
+// Expected shape: {"mode":"vision","model":"fast","confidence":0.93, "voltage:1.2", "latency_ms":7}
 void handleIncomingLine(const String& line) {
   lastRawLine = line;
 
@@ -106,10 +107,6 @@ void handleIncomingLine(const String& line) {
     return;
   }
 
-  // Parsed successfully, but confirm the fields we actually need are present.
-  // A line like "{}" or "{\"foo\":1}" parses as valid JSON but carries no
-  // useful telemetry -- surface that distinction instead of silently
-  // falling back to defaults, so a schema mismatch is visible in Serial.
   if (!doc.containsKey("mode") || !doc.containsKey("model")) {
     Serial.print("[UART] JSON parsed but missing expected keys: \"");
     Serial.print(line);
@@ -117,16 +114,16 @@ void handleIncomingLine(const String& line) {
   }
 
   Reading r;
-  r.mode        = doc["mode"]        | "unknown";
-  r.model       = doc["model"]       | "unknown";
-  r.confidence  = doc["confidence"]  | 0.0f;
-  r.latency_ms  = doc["latency_ms"]  | 0;
-  r.ts          = millis();
+  r.mode = doc["mode"] | "unknown";
+  r.model = doc["model"] | "unknown";
+  r.confidence = doc["confidence"] | 0.0f;
+  r.latency_ms = doc["latency_ms"] | 0;
+  r.voltage = doc["voltage"] | 0.0f;     // NEW
+  r.ts = millis();
 
   latest = r;
   pushHistory(r);
 }
-
 // Poll UART for newline-terminated JSON messages.
 // DIAGNOSTIC MODE: logs every raw byte received (hex + printable char) so
 // we can tell "no bytes arriving at all" apart from "bytes arriving but
@@ -180,25 +177,32 @@ void pollToggleButton() {
 // Serves the latest reading as JSON: used by the dashboard's poll loop
 void handleTelemetry() {
   StaticJsonDocument<512> doc;
-  doc["mode"]        = latest.mode;
-  doc["model"]       = latest.model;
-  doc["confidence"]  = latest.confidence;
-  doc["latency_ms"]  = latest.latency_ms;
-  doc["age_ms"]       = millis() - latest.ts;
+  doc["mode"] = latest.mode;
+  doc["model"] = latest.model;
+  doc["confidence"] = latest.confidence;
+  doc["latency_ms"] = latest.latency_ms;
+  doc["voltage"] = latest.voltage;      // NEW
+  doc["age_ms"] = millis() - latest.ts;
 
   JsonArray hist = doc.createNestedArray("history");
-  // walk the ring buffer oldest -> newest
   int start = (historyHead - historyCount + HISTORY_LEN) % HISTORY_LEN;
   for (int i = 0; i < historyCount; i++) {
     int idx = (start + i) % HISTORY_LEN;
     JsonObject h = hist.createNestedObject();
     h["latency_ms"] = history[idx].latency_ms;
     h["confidence"] = history[idx].confidence;
-    h["model"]      = history[idx].model;
+    h["voltage"] = history[idx].voltage;   // NEW
+    h["model"] = history[idx].model;
   }
 
   String out;
   serializeJson(doc, out);
+
+  // ADD a no-cache header here -- this plus the frontend cache-buster query
+  // param is the real fix for "stuck until I manually refresh": some
+  // browsers cache identical-URL XHR/fetch GETs more aggressively than
+  // you'd expect on a local network, especially after backgrounding a tab.
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
   server.send(200, "application/json", out);
 }
 
