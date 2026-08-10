@@ -5,7 +5,9 @@
 #include "semphr.h"
 #include "run_inference_dispatcher.h"
 #include "meta_controller_weights.h"
+#include "telemetry.h"
 #include <math.h>
+#include <stdlib.h>
 
 #define CMD_RESET     (0x06U)
 #define CMD_START1    (0x08U)
@@ -30,24 +32,28 @@ static volatile uint32_t g_capture_total_count = 0;
 static float g_inference_window[300];  /* max across all variants (accurate = 300) */
 static volatile model_variant_t g_active_variant = VARIANT_FAST;
 static uint32_t g_last_inference_capture_count = 0;
-#define CONFIDENCE_HISTORY_LEN 5
+#define CONFIDENCE_HISTORY_LEN 3
 
 static float g_confidence_history[CONFIDENCE_HISTORY_LEN] = { 0 };
 static uint32_t g_confidence_history_idx = 0;
 static float g_prev_window_rms = 0.0f;
+
+volatile uint32_t g_debug_needed_samples = 0;
+volatile uint32_t g_debug_active_variant = 0;
 
 typedef struct {
     float confidence_avg;   /* mean of last N p_anomaly values */
     float confidence_trend; /* latest p_anomaly - previous p_anomaly */
     float signal_delta;     /* current window RMS - previous window RMS */
     float latency_us;       /* wall-clock time of the aria_run_inference() call */
+    float signal_rms;       /* absolute current window RMS */
 } meta_controller_features_t;
 
 static volatile meta_controller_features_t g_meta_features = { 0 };
 
 /* ---- Meta-controller training data buffer ---- */
 #define META_LOG_SIZE 500
-static volatile float g_meta_log[META_LOG_SIZE][4]; /* conf_avg, conf_trend, signal_delta, latency_us */
+static volatile float g_meta_log[META_LOG_SIZE][5]; /* conf_avg, conf_trend, signal_delta, latency_us, signal_rms */
 static volatile uint32_t g_meta_log_index = 0;
 
 //#define ADC_CS_PORT   (BSP_IO_PORT_04_PIN_13)
@@ -72,6 +78,28 @@ volatile bool g_adc_spi_ok = true;
 volatile uint32_t g_adc_fail_point = 0;
 volatile fsp_err_t g_adc_fail_err = FSP_SUCCESS;
 volatile uint8_t g_last_rx[5] = { 0 };
+
+#define ESCALATE_CONFIRM_WINDOWS_PER_LEVEL   (1U)
+#define DEESCALATE_CONFIRM_WINDOWS_PER_LEVEL (3U)
+#define MIN_VARIANT_HOLD_WINDOWS             (2U)
+
+/* 1 = pin to Fast + log features; 0 = normal closed-loop control */
+#define ARIA_META_TRAINING_MODE (0)
+
+#define GATE_SIGNAL_RMS_FOR_BALANCED   (0.490f)
+#define GATE_SIGNAL_RMS_FOR_ACCURATE   (0.954f)
+
+static model_variant_t g_controller_candidate = VARIANT_FAST;
+static uint32_t g_candidate_streak = 0U;
+static uint32_t g_variant_hold_windows = 0U;
+
+/* Useful to expose on dashboard/debugger. */
+volatile uint32_t g_debug_controller_candidate = 0U;
+volatile uint32_t g_debug_candidate_streak = 0U;
+volatile uint32_t g_debug_variant_hold_windows = 0U;
+volatile int32_t  g_debug_inference_err = -999;
+volatile uint32_t g_debug_inference_count = 0U;
+volatile uint32_t g_debug_real_telemetry_count = 0U;
 
 /* ============================================================
    DWT-Based Benchmarking (Cortex-M85 cycle counter)
@@ -306,6 +334,61 @@ static float compute_window_rms(const float *window, uint32_t n)
     return (float)sqrt(sum_sq / (double)n);
 }
 
+static model_variant_t aria_apply_transition_policy(
+    model_variant_t active,
+    model_variant_t candidate,
+    float current_signal_rms)
+{
+    /* ---- Physical plausibility gate (runs before any hysteresis logic) ----
+     * Clamp an implausible candidate down to the highest variant the raw
+     * signal actually supports, regardless of what the network predicted.
+     * This never blocks a *correct* escalation -- it only vetoes cases where
+     * physical signal_rms is far below what that variant's training data
+     * ever showed. */
+    if (candidate == VARIANT_ACCURATE && current_signal_rms < GATE_SIGNAL_RMS_FOR_ACCURATE) {
+        candidate = (current_signal_rms < GATE_SIGNAL_RMS_FOR_BALANCED) ? VARIANT_FAST : VARIANT_BALANCED;
+    } else if (candidate == VARIANT_BALANCED && current_signal_rms < GATE_SIGNAL_RMS_FOR_BALANCED) {
+        candidate = VARIANT_FAST;
+    }
+
+    /* Always advance hold-time in the current active state. */
+    if (g_variant_hold_windows < 0xFFFFFFFFU) {
+        g_variant_hold_windows++;
+    }
+
+    if (candidate == active) {
+        g_candidate_streak = 0U;
+        return active;
+    }
+
+    if (candidate != g_controller_candidate) {
+        g_controller_candidate = candidate;
+        g_candidate_streak = 1U;
+    } else {
+        g_candidate_streak++;
+    }
+
+    /* ---- Magnitude-scaled confirmation ----
+     * A 2-level jump (e.g. Fast -> Accurate) now requires proportionally
+     * more consecutive confirming windows than a 1-level jump, instead of
+     * being treated identically to a small step. This directly targets the
+     * "one noisy window jumps straight to Accurate" failure mode. */
+    uint32_t jump_size = (uint32_t) abs((int)candidate - (int)active);
+    bool is_escalation = (candidate > active);
+
+    uint32_t required_windows = jump_size *
+        (is_escalation ? ESCALATE_CONFIRM_WINDOWS_PER_LEVEL : DEESCALATE_CONFIRM_WINDOWS_PER_LEVEL);
+
+    if ((g_variant_hold_windows >= MIN_VARIANT_HOLD_WINDOWS) &&
+        (g_candidate_streak >= required_windows)) {
+        g_variant_hold_windows = 0U;
+        g_candidate_streak = 0U;
+        return candidate;
+    }
+
+    return active;
+}
+
 void adc_thread_entry(void *pvParameters)
 {
     FSP_PARAMETER_NOT_USED(pvParameters);
@@ -319,7 +402,7 @@ void adc_thread_entry(void *pvParameters)
         g_adc_stage = 0xE001;
         vTaskSuspend(NULL);
     }
-
+    telemetry_init();
     //R_IOPORT_PinCfg(&g_ioport_ctrl, ADC_CS_PORT,
     //                 IOPORT_CFG_PORT_DIRECTION_OUTPUT | IOPORT_CFG_PORT_OUTPUT_HIGH);
 
@@ -391,7 +474,6 @@ void adc_thread_entry(void *pvParameters)
 
     /* ---- Benchmark: initialize DWT cycle counter once before loop ---- */
     benchmark_dwt_init();
-
     while (1)
     {
         /* ---- Benchmark: full loop iteration timing starts here ---- */
@@ -421,15 +503,22 @@ void adc_thread_entry(void *pvParameters)
                 g_capture_buffer[g_capture_index] = g_adc_voltage;
                 g_capture_index = (g_capture_index + 1) % CAPTURE_BUFFER_SIZE;
                 g_capture_total_count++;
+
                 uint32_t needed = (uint32_t)run_inference_get_required_samples(g_active_variant);
+                g_debug_needed_samples = needed;
+                g_debug_active_variant = (uint32_t) g_active_variant;
 
                 if ((g_capture_total_count - g_last_inference_capture_count) >= needed && needed <= 300) {
                     extract_inference_window(needed);
 
                     /* ---- Single, correctly-timed inference call ---- */
                     inference_result_t result;
+
                     uint32_t infer_t0 = benchmark_dwt_get();
+
                     int err = aria_run_inference(g_active_variant, g_inference_window, &result, false);
+                    g_debug_inference_err = err;
+                    g_debug_inference_count++;
                     uint32_t infer_t1 = benchmark_dwt_get();
                     benchmark_record(&g_infer_stats, benchmark_cycles_to_us(infer_t0, infer_t1));
 
@@ -439,7 +528,7 @@ void adc_thread_entry(void *pvParameters)
 
                         float current_rms = compute_window_rms(g_inference_window, needed);
                         uint32_t prev_idx = (g_confidence_history_idx + CONFIDENCE_HISTORY_LEN - 1) % CONFIDENCE_HISTORY_LEN;
-
+                        g_meta_features.signal_rms = current_rms;
                         g_meta_features.confidence_trend = p_anomaly - g_confidence_history[prev_idx];
                         g_meta_features.signal_delta = current_rms - g_prev_window_rms;
                         g_meta_features.latency_us = (float)benchmark_cycles_to_us(infer_t0, infer_t1);
@@ -456,22 +545,71 @@ void adc_thread_entry(void *pvParameters)
                         g_prev_window_rms = current_rms;
 
                         /* g_meta_features now holds this frame's runtime signals -- log a row
-                         * for meta-controller training data collection. */
+                         * for meta-controller training data collection. This always runs,
+                         * training mode or not, since it's the data we actually want. */
                         if (g_meta_log_index < META_LOG_SIZE) {
                             g_meta_log[g_meta_log_index][0] = g_meta_features.confidence_avg;
                             g_meta_log[g_meta_log_index][1] = g_meta_features.confidence_trend;
                             g_meta_log[g_meta_log_index][2] = g_meta_features.signal_delta;
                             g_meta_log[g_meta_log_index][3] = g_meta_features.latency_us;
+                            g_meta_log[g_meta_log_index][4] = g_meta_features.signal_rms;
                             g_meta_log_index++;
                         }
-                        g_active_variant = (model_variant_t)meta_controller_predict(
+
+                        /* ---- ARIA_META_TRAINING_MODE switch ----
+                         * Training mode: pin to Fast for the whole session so every logged
+                         * row is generated from the same reference model (no closed-loop
+                         * feedback / no variant-identity leakage into the features).
+                         * Normal mode: unchanged meta-controller + transition policy path. */
+                        model_variant_t candidate;
+    #if ARIA_META_TRAINING_MODE
+                        candidate = VARIANT_FAST;        /* not used for control, kept for debug symmetry */
+                        g_active_variant = VARIANT_FAST; /* pinned reference model during data collection */
+    #else
+                        candidate = (model_variant_t) meta_controller_predict(
                             g_meta_features.confidence_avg,
                             g_meta_features.confidence_trend,
                             g_meta_features.signal_delta,
-                            g_meta_features.latency_us
+                            g_meta_features.signal_rms
                         );
-                    }
 
+                        /*
+                         * Applies confirmation-window / hold-window logic.
+                         * g_active_variant is now the selected state for the
+                         * next inference window.
+                        */
+                        g_active_variant = aria_apply_transition_policy(
+                            g_active_variant,
+                            candidate,
+                            g_meta_features.signal_rms
+                        );
+    #endif
+
+                        g_debug_controller_candidate = (uint32_t) candidate;
+                        g_debug_active_variant = (uint32_t) g_active_variant;
+                        g_debug_candidate_streak = g_candidate_streak;
+                        g_debug_variant_hold_windows = g_variant_hold_windows;
+                        /*
+                         * Send telemetry ONLY after the new active state has
+                         * been chosen, so the dashboard reflects ARIA's current
+                         * selected variant.
+                        */
+                        g_debug_real_telemetry_count++;
+                        telemetry_send(
+                            g_active_variant,
+                            p_anomaly,
+                            (uint32_t) g_meta_features.latency_us,
+                            (float) g_adc_voltage
+                        );
+                    } else {
+                        /* Inference failed — do NOT update meta-features or log garbage.
+                         * Force fallback to Fast so the system recovers cleanly. */
+                        g_debug_inference_err = err;
+                        g_active_variant = VARIANT_FAST;
+                        g_variant_hold_windows = 0U;
+                        g_candidate_streak = 0U;
+                        g_controller_candidate = VARIANT_FAST;
+                    }
                     g_last_inference_capture_count = g_capture_total_count;
                 }
             }
@@ -484,7 +622,7 @@ void adc_thread_entry(void *pvParameters)
             g_adc_stage = 0xE003;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(50));
 
         /* ---- Benchmark: full loop iteration timing ends here ---- */
         uint32_t loop_t1 = benchmark_dwt_get();
