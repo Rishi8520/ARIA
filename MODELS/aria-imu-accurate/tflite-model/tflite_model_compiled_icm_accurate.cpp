@@ -524,7 +524,7 @@ class EonMicroContext : public MicroContext {
 
 } // namespace
 
-TfLiteStatus tflite_learn_1076931_3_init( void*(*alloc_fnc)(size_t,size_t) ) {
+TfLiteStatus tflite_learn_icm_accurate_init( void*(*alloc_fnc)(size_t,size_t) ) {
 #ifdef EI_CLASSIFIER_ALLOCATION_HEAP
   tensor_arena = (uint8_t*) alloc_fnc(16, kTensorArenaSize);
   if (!tensor_arena) {
@@ -596,17 +596,17 @@ TfLiteStatus tflite_learn_1076931_3_init( void*(*alloc_fnc)(size_t,size_t) ) {
   return kTfLiteOk;
 }
 
-TfLiteStatus tflite_learn_1076931_3_input(int index, TfLiteTensor *tensor) {
+TfLiteStatus tflite_learn_icm_accurate_input(int index, TfLiteTensor *tensor) {
   init_tflite_tensor(in_tensor_indices[index], tensor);
   return kTfLiteOk;
 }
 
-TfLiteStatus tflite_learn_1076931_3_output(int index, TfLiteTensor *tensor) {
+TfLiteStatus tflite_learn_icm_accurate_output(int index, TfLiteTensor *tensor) {
   init_tflite_tensor(out_tensor_indices[index], tensor);
   return kTfLiteOk;
 }
 
-TfLiteStatus tflite_learn_1076931_3_invoke() {
+TfLiteStatus tflite_learn_icm_accurate_invoke() {
   for (size_t i = 0; i < 4; ++i) {
     ResetTensors();
 
@@ -678,7 +678,7 @@ TfLiteStatus tflite_learn_1076931_3_invoke() {
   return kTfLiteOk;
 }
 
-TfLiteStatus tflite_learn_1076931_3_reset( void (*free_fnc)(void* ptr) ) {
+TfLiteStatus tflite_learn_icm_accurate_reset( void (*free_fnc)(void* ptr) ) {
 #ifdef EI_CLASSIFIER_ALLOCATION_HEAP
   free_fnc(tensor_arena);
 #endif

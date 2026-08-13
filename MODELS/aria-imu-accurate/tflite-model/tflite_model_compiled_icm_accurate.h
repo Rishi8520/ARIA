@@ -30,29 +30,29 @@
  */
 // Generated on: 02.08.2026 10:34:50
 
-#ifndef tflite_learn_1076931_3_GEN_H
-#define tflite_learn_1076931_3_GEN_H
+#ifndef tflite_learn_icm_accurate_GEN_H
+#define tflite_learn_icm_accurate_GEN_H
 
 #include "edge-impulse-sdk/tensorflow/lite/c/common.h"
 
 // Sets up the model with init and prepare steps.
-TfLiteStatus tflite_learn_1076931_3_init( void*(*alloc_fnc)(size_t,size_t) );
+TfLiteStatus tflite_learn_icm_accurate_init( void*(*alloc_fnc)(size_t,size_t) );
 // Returns the input tensor with the given index.
-TfLiteStatus tflite_learn_1076931_3_input(int index, TfLiteTensor* tensor);
+TfLiteStatus tflite_learn_icm_accurate_input(int index, TfLiteTensor* tensor);
 // Returns the output tensor with the given index.
-TfLiteStatus tflite_learn_1076931_3_output(int index, TfLiteTensor* tensor);
+TfLiteStatus tflite_learn_icm_accurate_output(int index, TfLiteTensor* tensor);
 // Runs inference for the model.
-TfLiteStatus tflite_learn_1076931_3_invoke();
+TfLiteStatus tflite_learn_icm_accurate_invoke();
 //Frees memory allocated
-TfLiteStatus tflite_learn_1076931_3_reset( void (*free)(void* ptr) );
+TfLiteStatus tflite_learn_icm_accurate_reset( void (*free)(void* ptr) );
 
 
 // Returns the number of input tensors.
-inline size_t tflite_learn_1076931_3_inputs() {
+inline size_t tflite_learn_icm_accurate_inputs() {
   return 1;
 }
 // Returns the number of output tensors.
-inline size_t tflite_learn_1076931_3_outputs() {
+inline size_t tflite_learn_icm_accurate_outputs() {
   return 1;
 }
 

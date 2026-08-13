@@ -29,8 +29,8 @@
  * permissions, disclaimers and limitations under the License.
  */
 
-#ifndef EI_TFLITE_MODEL_OPS_DEFINES_H
-#define EI_TFLITE_MODEL_OPS_DEFINES_H
+#ifndef EI_TFLITE_MODEL_OPS_DEFINES_ICM_H
+#define EI_TFLITE_MODEL_OPS_DEFINES_ICM_H
 
 #define EI_TFLITE_DISABLE_SOFTMAX_IN_U8     1
 #define EI_TFLITE_DISABLE_SOFTMAX_IN_I16    1
