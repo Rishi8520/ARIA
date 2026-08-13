@@ -89,6 +89,11 @@ volatile uint8_t g_last_rx[5] = { 0 };
 #define GATE_SIGNAL_RMS_FOR_BALANCED   (0.490f)
 #define GATE_SIGNAL_RMS_FOR_ACCURATE   (0.954f)
 
+/* Within the intermediate signal band, the trained meta-controller may
+ * promote BALANCED -> ACCURATE only after the physical signal has already
+ * reached this level. */
+#define GATE_SIGNAL_RMS_FOR_MID_ACCURATE (0.750f)
+
 static model_variant_t g_controller_candidate = VARIANT_FAST;
 static uint32_t g_candidate_streak = 0U;
 static uint32_t g_variant_hold_windows = 0U;
@@ -334,6 +339,48 @@ static float compute_window_rms(const float *window, uint32_t n)
     return (float)sqrt(sum_sq / (double)n);
 }
 
+/*
+ * Signal-first ADS meta-controller.
+ *
+ * Hard physical guarantees:
+ *   low RMS    -> FAST
+ *   high RMS   -> ACCURATE
+ *
+ * In the middle band, BALANCED is the default. The trained meta-controller is
+ * retained as a secondary refinement and may promote to ACCURATE only when the
+ * physical RMS itself is already substantial.
+ */
+static model_variant_t aria_signal_meta_candidate(
+    float confidence_avg,
+    float confidence_trend,
+    float signal_delta,
+    float signal_rms)
+{
+    if (signal_rms < GATE_SIGNAL_RMS_FOR_BALANCED)
+    {
+        return VARIANT_FAST;
+    }
+
+    if (signal_rms >= GATE_SIGNAL_RMS_FOR_ACCURATE)
+    {
+        return VARIANT_ACCURATE;
+    }
+
+    int learned_class = meta_controller_predict(
+        confidence_avg,
+        confidence_trend,
+        signal_delta,
+        signal_rms);
+
+    if ((learned_class == (int)VARIANT_ACCURATE) &&
+        (signal_rms >= GATE_SIGNAL_RMS_FOR_MID_ACCURATE))
+    {
+        return VARIANT_ACCURATE;
+    }
+
+    return VARIANT_BALANCED;
+}
+
 static model_variant_t aria_apply_transition_policy(
     model_variant_t active,
     model_variant_t candidate,
@@ -504,9 +551,18 @@ void adc_thread_entry(void *pvParameters)
                 g_capture_index = (g_capture_index + 1) % CAPTURE_BUFFER_SIZE;
                 g_capture_total_count++;
 
-                uint32_t needed = (uint32_t)run_inference_get_required_samples(g_active_variant);
+                /*
+                 * Snapshot the model that will actually produce this result.
+                 * The controller may choose a different model afterwards for
+                 * the next inference window.
+                 */
+                model_variant_t variant_used = g_active_variant;
+
+                uint32_t needed =
+                    (uint32_t)run_inference_get_required_samples(variant_used);
+
                 g_debug_needed_samples = needed;
-                g_debug_active_variant = (uint32_t) g_active_variant;
+                g_debug_active_variant = (uint32_t) variant_used;
 
                 if ((g_capture_total_count - g_last_inference_capture_count) >= needed && needed <= 300) {
                     extract_inference_window(needed);
@@ -516,7 +572,7 @@ void adc_thread_entry(void *pvParameters)
 
                     uint32_t infer_t0 = benchmark_dwt_get();
 
-                    int err = aria_run_inference(g_active_variant, g_inference_window, &result, false);
+                    int err = aria_run_inference(variant_used, g_inference_window, &result, false);
                     g_debug_inference_err = err;
                     g_debug_inference_count++;
                     uint32_t infer_t1 = benchmark_dwt_get();
@@ -566,7 +622,7 @@ void adc_thread_entry(void *pvParameters)
                         candidate = VARIANT_FAST;        /* not used for control, kept for debug symmetry */
                         g_active_variant = VARIANT_FAST; /* pinned reference model during data collection */
     #else
-                        candidate = (model_variant_t) meta_controller_predict(
+                        candidate = aria_signal_meta_candidate(
                             g_meta_features.confidence_avg,
                             g_meta_features.confidence_trend,
                             g_meta_features.signal_delta,
@@ -596,7 +652,7 @@ void adc_thread_entry(void *pvParameters)
                         */
                         g_debug_real_telemetry_count++;
                         telemetry_send(
-                            g_active_variant,
+                            variant_used,
                             p_anomaly,
                             (uint32_t) g_meta_features.latency_us,
                             (float) g_adc_voltage
