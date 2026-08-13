@@ -92,11 +92,11 @@
             (1 << 15) /* ETHERC/EDMAC */ | \
             (1 << 16) /* OSPI */ | \
             (((1 > 0) ? 0U : 1U) << 18) /* SPI1 */ | \
-            (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 19) /* SPI0 */ | \
+            (((1 > 0) ? 0U : 1U) << 19) /* SPI0 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 22) /* SCI9 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 27) /* SCI4 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 28) /* SCI3 */ | \
-            (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 29) /* SCI2 */ | \
+            (((1 > 0) ? 0U : 1U) << 29) /* SCI2 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 30) /* SCI1 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 31) /* SCI0 */)
 #endif
@@ -154,7 +154,7 @@
 #endif
 #ifndef BSP_TZ_CFG_MSSAR
 #define BSP_TZ_CFG_MSSAR (\
-            (((2 > 0) ? 0U : 1U) << 22) /* DTC_DMAC */ | \
+            (((4 > 0) ? 0U : 1U) << 22) /* DTC_DMAC */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 31) /* ELC */)
 #endif
 
@@ -286,7 +286,7 @@
 #endif
 
 /* Set DTCSTSAR if the Secure program uses the DTC. */
-#if 2 == RA_NOT_DEFINED
+#if 4 == RA_NOT_DEFINED
  #define BSP_TZ_CFG_DTC_USED (0U)
 #else
 #define BSP_TZ_CFG_DTC_USED (1U)
