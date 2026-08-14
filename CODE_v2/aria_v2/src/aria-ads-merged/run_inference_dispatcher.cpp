@@ -60,6 +60,11 @@
 
 static const float *g_active_window = nullptr;
 
+extern "C" volatile int32_t g_ads_direct_dsp_result = -999;
+extern "C" volatile uint32_t g_ads_dsp_output_size = 0U;
+extern "C" volatile uint32_t g_ads_dsp_block_count = 0U;
+extern "C" volatile uint32_t g_ads_nn_input_size = 0U;
+
 /* Edge Impulse signal callback for ADS. */
 static int get_signal_data(
     size_t offset,
@@ -97,6 +102,72 @@ size_t run_inference_get_required_samples(
 /* ============================================================
  * ADS1263 inference
  * ============================================================ */
+
+/*
+ * Direct ADS DSP diagnostic probe.
+ *
+ * This does NOT replace the normal ADS run_classifier() path. It only calls
+ * the selected impulse's first DSP block directly so the underlying EIDSP
+ * return code can be inspected in the debugger instead of only seeing the
+ * generic EI_IMPULSE_DSP_ERROR (-5).
+ */
+static int ads_probe_dsp_direct(
+    ei_impulse_handle_t *handle,
+    const float *sample_window,
+    size_t sample_count)
+{
+    if ((handle == nullptr) ||
+        (handle->impulse == nullptr) ||
+        (sample_window == nullptr))
+    {
+        return -100;
+    }
+
+    const ei_impulse_t *impulse =
+        handle->impulse;
+
+    g_ads_dsp_block_count =
+        (uint32_t)impulse->dsp_blocks_size;
+
+    g_ads_nn_input_size =
+        (uint32_t)impulse->nn_input_frame_size;
+
+    if (impulse->dsp_blocks_size == 0U)
+    {
+        return -101;
+    }
+
+    ei_model_dsp_t *dsp_block =
+        &impulse->dsp_blocks[0];
+
+    g_ads_dsp_output_size =
+        (uint32_t)dsp_block->n_output_features;
+
+    g_active_window =
+        sample_window;
+
+    signal_t signal;
+    signal.total_length =
+        sample_count;
+    signal.get_data =
+        &get_signal_data;
+
+    matrix_t output_matrix(
+        1,
+        dsp_block->n_output_features);
+
+    int result =
+        dsp_block->extract_fn(
+            &signal,
+            &output_matrix,
+            dsp_block->config,
+            impulse->frequency);
+
+    g_active_window =
+        nullptr;
+
+    return result;
+}
 
 int aria_run_inference(
     model_variant_t variant,
@@ -156,6 +227,12 @@ int aria_run_inference(
         &result,
         0,
         sizeof(result));
+
+    g_ads_direct_dsp_result =
+        ads_probe_dsp_direct(
+            handle,
+            sample_window,
+            sample_count);
 
     EI_IMPULSE_ERROR err =
         run_classifier(
