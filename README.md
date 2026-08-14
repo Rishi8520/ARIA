@@ -385,7 +385,7 @@ Key deployment result:
 - No runtime model loading, reflashing, or cloud inference is required when
   switching between Fast, Balanced, and Accurate.
 
-See **[result.md](./result.md)** for the complete per-model accuracy, compiled
+See **[RESULTS.md](./RESULTS.md)** for the complete per-model accuracy, compiled
 size, runtime benchmark results, and hardware evidence.
 
 ## 7. Meta-Controller Design
