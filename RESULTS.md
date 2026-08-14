@@ -269,14 +269,13 @@ The UART concurrency issue is solved by a static binary semaphore TX gate.
 
 <img width="5712" height="4284" alt="IMG_2589 2" src="https://github.com/user-attachments/assets/3967a7f2-0abe-46bd-8083-3e628b4eee0a" />
 
-
 *Top view of the EK-RA8D1, breadboarded sensor/input circuitry, ICM-20948, ESP32 telemetry bridge, and connected development setup.*
 
 ### Dashboard
 
-*Telemetry live dashboard connected from EK-RA8D1 to ESP32 via UART.*
-
 <img width="1600" height="900" alt="aria_telemetry" src="https://github.com/user-attachments/assets/8b32d95a-8b7b-48b8-9a86-f087aec2e9ac" />
+
+*Telemetry live dashboard connected from EK-RA8D1 to ESP32 via UART.*
 
 ### Live System + Dashboard
 
