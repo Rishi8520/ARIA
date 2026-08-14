@@ -86,25 +86,126 @@ volatile uint8_t g_last_rx[5] = { 0 };
 /* 1 = pin to Fast + log features; 0 = normal closed-loop control */
 #define ARIA_META_TRAINING_MODE (0)
 
-#define GATE_SIGNAL_RMS_FOR_BALANCED   (0.490f)
-#define GATE_SIGNAL_RMS_FOR_ACCURATE   (0.954f)
-
-/* Within the intermediate signal band, the trained meta-controller may
- * promote BALANCED -> ACCURATE only after the physical signal has already
- * reached this level. */
-#define GATE_SIGNAL_RMS_FOR_MID_ACCURATE (0.750f)
+/*
+ * Learned ADS routing with adaptive transient escalation.
+ *
+ * Normal model selection remains driven by the trained meta-controller.
+ * Abrupt sample-to-sample changes are split into two severity bands:
+ *
+ *   moderate sudden spike/dip -> BALANCED immediately
+ *   strong sudden spike/dip   -> ACCURATE immediately
+ *
+ * Both transient requests are latched until one real inference from the
+ * requested model completes successfully.  ACCURATE always has priority and
+ * may preempt a pending BALANCED transient.
+ *
+ * This does NOT use an absolute signal-voltage band such as
+ * "voltage > X -> model".  It compares the newest step magnitude against the
+ * recent step-size baseline, with minimum step floors for noise rejection.
+ */
 
 static model_variant_t g_controller_candidate = VARIANT_FAST;
 static uint32_t g_candidate_streak = 0U;
 static uint32_t g_variant_hold_windows = 0U;
 
+/*
+ * Hierarchical scheduler target.  A learned two-tier request is latched long
+ * enough to traverse the real model hierarchy one level at a time:
+ *
+ *     FAST <-> BALANCED <-> ACCURATE
+ *
+ * This is scheduler state only.  No voltage/RMS threshold participates.
+ */
+static model_variant_t g_controller_target = VARIANT_FAST;
+static bool g_controller_target_pending = false;
+
 /* Useful to expose on dashboard/debugger. */
 volatile uint32_t g_debug_controller_candidate = 0U;
 volatile uint32_t g_debug_candidate_streak = 0U;
 volatile uint32_t g_debug_variant_hold_windows = 0U;
+volatile uint32_t g_debug_controller_target = 0U;
+volatile uint32_t g_debug_target_pending = 0U;
 volatile int32_t  g_debug_inference_err = -999;
 volatile uint32_t g_debug_inference_count = 0U;
 volatile uint32_t g_debug_real_telemetry_count = 0U;
+
+/*
+ * Raw learned output scores (pre-softmax logits) from the existing
+ * 4 -> 16 -> 3 trained meta-controller.  These are debugger-visible so the
+ * routing decision can be inspected without changing the generated weights.
+ */
+volatile float g_debug_meta_score_fast = 0.0f;
+volatile float g_debug_meta_score_balanced = 0.0f;
+volatile float g_debug_meta_score_accurate = 0.0f;
+volatile int32_t g_debug_meta_argmax = 0;
+
+/* ---- Adaptive sudden-transient guard ----
+ * Detects abrupt positive OR negative sample-to-sample changes and maps them
+ * to a compute tier by transient severity.
+ *
+ * balanced_threshold = max(BALANCED_MIN_STEP,
+ *                          BALANCED_MULTIPLIER * recent mean absolute step)
+ *
+ * accurate_threshold = max(ACCURATE_MIN_STEP,
+ *                          ACCURATE_MULTIPLIER * recent mean absolute step)
+ *
+ * The comparison is against rate-of-change, not absolute ADC voltage.
+ * ACCURATE is checked first so a strong event cannot be swallowed by the
+ * BALANCED band.
+ *
+ * Initial tuning deliberately leaves a useful BALANCED region.  If the real
+ * hardware needs retuning, only these four severity constants need changing.
+ */
+#define ADS_TRANSIENT_STEP_EMA_ALPHA          (0.05f)
+#define ADS_BALANCED_STEP_MULTIPLIER          (3.0f)
+#define ADS_BALANCED_MIN_STEP_V               (0.100f)
+#define ADS_ACCURATE_STEP_MULTIPLIER          (6.0f)
+#define ADS_ACCURATE_MIN_STEP_V               (0.650f)
+
+typedef enum
+{
+    ADS_TRANSIENT_NONE = 0,
+    ADS_TRANSIENT_BALANCED = 1,
+    ADS_TRANSIENT_ACCURATE = 2
+} ads_transient_level_t;
+
+static bool  g_ads_transient_initialized = false;
+static float g_ads_transient_prev_sample = 0.0f;
+static float g_ads_transient_step_ema = 0.0f;
+static bool  g_ads_transient_balanced_latched = false;
+static bool  g_ads_transient_accurate_latched = false;
+
+volatile float g_debug_transient_signed_step_v = 0.0f;
+volatile float g_debug_transient_abs_step_v = 0.0f;
+volatile float g_debug_transient_balanced_threshold_v = 0.0f;
+volatile float g_debug_transient_accurate_threshold_v = 0.0f;
+/* Backward-compatible alias: reports the current ACCURATE threshold. */
+volatile float g_debug_transient_threshold_v = 0.0f;
+volatile uint32_t g_debug_transient_count = 0U;
+volatile uint32_t g_debug_transient_balanced_count = 0U;
+volatile uint32_t g_debug_transient_accurate_count = 0U;
+/* 0 = no transient latch, 1 = BALANCED latch, 2 = ACCURATE latch. */
+volatile uint32_t g_debug_transient_latched = 0U;
+volatile uint32_t g_debug_transient_balanced_latched = 0U;
+volatile uint32_t g_debug_transient_accurate_latched = 0U;
+
+/* ---- Decoupled live ADS telemetry ----
+ * Voltage is transmitted periodically from fresh ADC samples instead of only
+ * when an inference window completes.  The model field reports the current
+ * learned controller state; confidence/latency remain from the most recent
+ * successful real inference. */
+#define ADS_LIVE_TELEMETRY_PERIOD_MS (100U)
+
+static float g_ads_last_inference_confidence = 0.0f;
+static uint32_t g_ads_last_inference_latency_us = 0U;
+static TickType_t g_ads_last_live_telemetry_tick = 0U;
+
+/*
+ * Live telemetry is decoupled from inference completion.  Normal routing is
+ * driven by the trained meta-controller.  In addition, the adaptive transient
+ * guard below can immediately request BALANCED for a moderate abrupt change
+ * or ACCURATE for a stronger abrupt change.
+ */
 
 /* ============================================================
    DWT-Based Benchmarking (Cortex-M85 cycle counter)
@@ -340,40 +441,188 @@ static float compute_window_rms(const float *window, uint32_t n)
 }
 
 /*
- * Signal-first ADS meta-controller.
- *
- * Hard physical guarantees:
- *   low RMS    -> FAST
- *   high RMS   -> ACCURATE
- *
- * In the middle band, BALANCED is the default. The trained meta-controller is
- * retained as a secondary refinement and may promote to ACCURATE only when the
- * physical RMS itself is already substantial.
+ * Classify a sudden positive spike or negative dip from sample-to-sample
+ * change.  The detector is adaptive: ordinary movement updates an exponential
+ * moving average of absolute step size.  Moderate/strong transient samples are
+ * not folded into that EMA, preventing a single event from immediately
+ * desensitizing the detector.
  */
-static model_variant_t aria_signal_meta_candidate(
+static ads_transient_level_t aria_ads_detect_sudden_transient(float sample)
+{
+    if (!g_ads_transient_initialized)
+    {
+        g_ads_transient_prev_sample = sample;
+        g_ads_transient_initialized = true;
+
+        g_debug_transient_signed_step_v = 0.0f;
+        g_debug_transient_abs_step_v = 0.0f;
+        g_debug_transient_balanced_threshold_v = ADS_BALANCED_MIN_STEP_V;
+        g_debug_transient_accurate_threshold_v = ADS_ACCURATE_MIN_STEP_V;
+        g_debug_transient_threshold_v = ADS_ACCURATE_MIN_STEP_V;
+        return ADS_TRANSIENT_NONE;
+    }
+
+    float signed_step = sample - g_ads_transient_prev_sample;
+    float abs_step = fabsf(signed_step);
+    g_ads_transient_prev_sample = sample;
+
+    float balanced_threshold =
+        ADS_BALANCED_STEP_MULTIPLIER * g_ads_transient_step_ema;
+
+    if (balanced_threshold < ADS_BALANCED_MIN_STEP_V)
+    {
+        balanced_threshold = ADS_BALANCED_MIN_STEP_V;
+    }
+
+    float accurate_threshold =
+        ADS_ACCURATE_STEP_MULTIPLIER * g_ads_transient_step_ema;
+
+    if (accurate_threshold < ADS_ACCURATE_MIN_STEP_V)
+    {
+        accurate_threshold = ADS_ACCURATE_MIN_STEP_V;
+    }
+
+    /* Keep the ordering valid even if constants are retuned later. */
+    if (accurate_threshold <= balanced_threshold)
+    {
+        accurate_threshold = balanced_threshold + 0.001f;
+    }
+
+    g_debug_transient_signed_step_v = signed_step;
+    g_debug_transient_abs_step_v = abs_step;
+    g_debug_transient_balanced_threshold_v = balanced_threshold;
+    g_debug_transient_accurate_threshold_v = accurate_threshold;
+    g_debug_transient_threshold_v = accurate_threshold;
+
+    ads_transient_level_t level = ADS_TRANSIENT_NONE;
+
+    /* Strong transient wins over the moderate transient band. */
+    if (abs_step >= accurate_threshold)
+    {
+        level = ADS_TRANSIENT_ACCURATE;
+    }
+    else if (abs_step >= balanced_threshold)
+    {
+        level = ADS_TRANSIENT_BALANCED;
+    }
+
+    if (level == ADS_TRANSIENT_NONE)
+    {
+        g_ads_transient_step_ema +=
+            ADS_TRANSIENT_STEP_EMA_ALPHA *
+            (abs_step - g_ads_transient_step_ema);
+    }
+
+    return level;
+}
+
+/*
+ * Compute the three raw output scores of the EXISTING trained ADS
+ * meta-controller without changing meta_controller_weights.h.
+ *
+ * This reproduces the exact scaler -> ReLU hidden layer -> output layer
+ * already used by meta_controller_predict().  The values are logits; only
+ * their relative ordering is used here, so no softmax is required.
+ */
+static void aria_meta_controller_scores(
+    float confidence_avg,
+    float confidence_trend,
+    float signal_delta,
+    float signal_rms,
+    float out[3])
+{
+    float x[4] = {
+        confidence_avg,
+        confidence_trend,
+        signal_delta,
+        signal_rms
+    };
+
+    float xs[4];
+    for (int i = 0; i < 4; i++)
+    {
+        xs[i] = (x[i] - META_SCALER_MEAN[i]) / META_SCALER_SCALE[i];
+    }
+
+    float h[META_HIDDEN_UNITS];
+    for (int j = 0; j < META_HIDDEN_UNITS; j++)
+    {
+        float sum = META_B1[j];
+        for (int i = 0; i < 4; i++)
+        {
+            sum += xs[i] * META_W1[i][j];
+        }
+        h[j] = (sum > 0.0f) ? sum : 0.0f;
+    }
+
+    for (int k = 0; k < 3; k++)
+    {
+        float sum = META_B2[k];
+        for (int j = 0; j < META_HIDDEN_UNITS; j++)
+        {
+            sum += h[j] * META_W2[j][k];
+        }
+        out[k] = sum;
+    }
+}
+
+/*
+ * Learned-score ADS candidate policy.
+ *
+ * There are still NO voltage/RMS thresholds here.  The decision is based
+ * entirely on the trained MLP's own three output scores.
+ *
+ * Normal argmax behaviour is kept for FAST and ACCURATE.  When BALANCED is
+ * the argmax, the policy looks at which adjacent alternative the learned
+ * network supports more strongly:
+ *
+ *   BALANCED wins + ACCURATE score > FAST score -> ACCURATE
+ *   BALANCED wins + FAST score >= ACCURATE score -> BALANCED
+ *
+ * This is a cost-sensitive policy over learned scores, not a sensor-value
+ * threshold.  It prevents a near-tie BALANCED/ACCURATE decision from
+ * permanently starving the highest-capacity model.
+ */
+static model_variant_t aria_learned_meta_candidate(
     float confidence_avg,
     float confidence_trend,
     float signal_delta,
     float signal_rms)
 {
-    if (signal_rms < GATE_SIGNAL_RMS_FOR_BALANCED)
+    float out[3];
+    aria_meta_controller_scores(
+        confidence_avg,
+        confidence_trend,
+        signal_delta,
+        signal_rms,
+        out);
+
+    g_debug_meta_score_fast = out[(int)VARIANT_FAST];
+    g_debug_meta_score_balanced = out[(int)VARIANT_BALANCED];
+    g_debug_meta_score_accurate = out[(int)VARIANT_ACCURATE];
+
+    int best = 0;
+    for (int k = 1; k < 3; k++)
+    {
+        if (out[k] > out[best])
+        {
+            best = k;
+        }
+    }
+    g_debug_meta_argmax = best;
+
+    if (best == (int)VARIANT_FAST)
     {
         return VARIANT_FAST;
     }
 
-    if (signal_rms >= GATE_SIGNAL_RMS_FOR_ACCURATE)
+    if (best == (int)VARIANT_ACCURATE)
     {
         return VARIANT_ACCURATE;
     }
 
-    int learned_class = meta_controller_predict(
-        confidence_avg,
-        confidence_trend,
-        signal_delta,
-        signal_rms);
-
-    if ((learned_class == (int)VARIANT_ACCURATE) &&
-        (signal_rms >= GATE_SIGNAL_RMS_FOR_MID_ACCURATE))
+    /* BALANCED is argmax.  Use the learned runner-up direction. */
+    if (out[(int)VARIANT_ACCURATE] > out[(int)VARIANT_FAST])
     {
         return VARIANT_ACCURATE;
     }
@@ -381,59 +630,134 @@ static model_variant_t aria_signal_meta_candidate(
     return VARIANT_BALANCED;
 }
 
+/*
+ * Pure learned hierarchical transition scheduler.
+ *
+ * The learned score policy above chooses the requested destination.  This
+ * scheduler never inspects ADC voltage, RMS, or any physical threshold.  It
+ * only enforces one-model-tier-at-a-time movement:
+ *
+ *     FAST <-> BALANCED <-> ACCURATE
+ *
+ * A two-level learned request is latched until the intermediate BALANCED
+ * model has genuinely run and the requested destination is reached.
+ */
 static model_variant_t aria_apply_transition_policy(
     model_variant_t active,
-    model_variant_t candidate,
-    float current_signal_rms)
+    model_variant_t candidate)
 {
-    /* ---- Physical plausibility gate (runs before any hysteresis logic) ----
-     * Clamp an implausible candidate down to the highest variant the raw
-     * signal actually supports, regardless of what the network predicted.
-     * This never blocks a *correct* escalation -- it only vetoes cases where
-     * physical signal_rms is far below what that variant's training data
-     * ever showed. */
-    if (candidate == VARIANT_ACCURATE && current_signal_rms < GATE_SIGNAL_RMS_FOR_ACCURATE) {
-        candidate = (current_signal_rms < GATE_SIGNAL_RMS_FOR_BALANCED) ? VARIANT_FAST : VARIANT_BALANCED;
-    } else if (candidate == VARIANT_BALANCED && current_signal_rms < GATE_SIGNAL_RMS_FOR_BALANCED) {
-        candidate = VARIANT_FAST;
-    }
-
-    /* Always advance hold-time in the current active state. */
-    if (g_variant_hold_windows < 0xFFFFFFFFU) {
+    if (g_variant_hold_windows < 0xFFFFFFFFU)
+    {
         g_variant_hold_windows++;
     }
 
-    if (candidate == active) {
+    /*
+     * Start or refresh a destination when no multi-step transition is active.
+     * The raw learned candidate is kept separately for debug visibility.
+     */
+    if (!g_controller_target_pending)
+    {
+        g_controller_target = candidate;
+
+        if (abs((int)candidate - (int)active) > 1)
+        {
+            g_controller_target_pending = true;
+        }
+    }
+
+    model_variant_t target =
+        g_controller_target_pending ? g_controller_target : candidate;
+
+    /*
+     * Keep the raw learned request visible in g_controller_candidate.
+     *
+     * When a two-level learned target is pending, the destination has already
+     * been latched by the MLP.  Do NOT require the intermediate BALANCED
+     * inference to reproduce the original ACCURATE argmax; doing so was the
+     * reason a FAST -> BALANCED transition could stall before ACCURATE.
+     * During a pending route, the streak therefore tracks scheduler progress
+     * toward the already-learned target rather than repeated raw argmax identity.
+     */
+    bool candidate_changed = (candidate != g_controller_candidate);
+
+    if (candidate_changed)
+    {
+        g_controller_candidate = candidate;
+
+        if (!g_controller_target_pending)
+        {
+            g_candidate_streak = 1U;
+        }
+    }
+
+    if (g_controller_target_pending)
+    {
+        if (g_candidate_streak < 0xFFFFFFFFU)
+        {
+            g_candidate_streak++;
+        }
+    }
+    else if (!candidate_changed && g_candidate_streak < 0xFFFFFFFFU)
+    {
+        g_candidate_streak++;
+    }
+
+    if (active == target)
+    {
+        g_controller_target_pending = false;
+        g_controller_target = active;
         g_candidate_streak = 0U;
         return active;
     }
 
-    if (candidate != g_controller_candidate) {
-        g_controller_candidate = candidate;
-        g_candidate_streak = 1U;
-    } else {
-        g_candidate_streak++;
+    bool is_escalation = (target > active);
+
+    uint32_t required_windows =
+        is_escalation ?
+        ESCALATE_CONFIRM_WINDOWS_PER_LEVEL :
+        DEESCALATE_CONFIRM_WINDOWS_PER_LEVEL;
+
+    if ((g_variant_hold_windows < MIN_VARIANT_HOLD_WINDOWS) ||
+        (g_candidate_streak < required_windows))
+    {
+        return active;
     }
 
-    /* ---- Magnitude-scaled confirmation ----
-     * A 2-level jump (e.g. Fast -> Accurate) now requires proportionally
-     * more consecutive confirming windows than a 1-level jump, instead of
-     * being treated identically to a small step. This directly targets the
-     * "one noisy window jumps straight to Accurate" failure mode. */
-    uint32_t jump_size = (uint32_t) abs((int)candidate - (int)active);
-    bool is_escalation = (candidate > active);
+    model_variant_t next_variant = active;
 
-    uint32_t required_windows = jump_size *
-        (is_escalation ? ESCALATE_CONFIRM_WINDOWS_PER_LEVEL : DEESCALATE_CONFIRM_WINDOWS_PER_LEVEL);
-
-    if ((g_variant_hold_windows >= MIN_VARIANT_HOLD_WINDOWS) &&
-        (g_candidate_streak >= required_windows)) {
-        g_variant_hold_windows = 0U;
-        g_candidate_streak = 0U;
-        return candidate;
+    if (target > active)
+    {
+        if (active == VARIANT_FAST)
+        {
+            next_variant = VARIANT_BALANCED;
+        }
+        else if (active == VARIANT_BALANCED)
+        {
+            next_variant = VARIANT_ACCURATE;
+        }
+    }
+    else
+    {
+        if (active == VARIANT_ACCURATE)
+        {
+            next_variant = VARIANT_BALANCED;
+        }
+        else if (active == VARIANT_BALANCED)
+        {
+            next_variant = VARIANT_FAST;
+        }
     }
 
-    return active;
+    g_variant_hold_windows = 0U;
+    g_candidate_streak = 0U;
+
+    if (next_variant == target)
+    {
+        g_controller_target_pending = false;
+        g_controller_target = next_variant;
+    }
+
+    return next_variant;
 }
 
 void adc_thread_entry(void *pvParameters)
@@ -545,6 +869,66 @@ void adc_thread_entry(void *pvParameters)
             g_adc_voltage = (((double) g_adc_code / 2147483648.0) * 2.5);
             g_adc_stage = 5;
 
+            ads_transient_level_t transient_level =
+                aria_ads_detect_sudden_transient((float)g_adc_voltage);
+
+#if !ARIA_META_TRAINING_MODE
+            if (transient_level == ADS_TRANSIENT_ACCURATE)
+            {
+                /*
+                 * Strong abrupt event: ACCURATE has highest priority and may
+                 * preempt a pending BALANCED transient.  Keep ACCURATE latched
+                 * until one genuine ACCURATE inference succeeds.
+                 */
+                g_ads_transient_balanced_latched = false;
+                g_ads_transient_accurate_latched = true;
+
+                g_debug_transient_count++;
+                g_debug_transient_accurate_count++;
+                g_debug_transient_latched = 2U;
+                g_debug_transient_balanced_latched = 0U;
+                g_debug_transient_accurate_latched = 1U;
+
+                g_active_variant = VARIANT_ACCURATE;
+                g_controller_target = VARIANT_ACCURATE;
+                g_controller_target_pending = false;
+                g_candidate_streak = 0U;
+                g_variant_hold_windows = 0U;
+
+                g_debug_active_variant = (uint32_t)VARIANT_ACCURATE;
+                g_debug_controller_target = (uint32_t)VARIANT_ACCURATE;
+                g_debug_target_pending = 0U;
+            }
+            else if ((transient_level == ADS_TRANSIENT_BALANCED) &&
+                     !g_ads_transient_accurate_latched)
+            {
+                /*
+                 * Moderate abrupt event: request BALANCED immediately and
+                 * keep it latched until one genuine BALANCED inference
+                 * succeeds.  An ACCURATE transient can still preempt it.
+                 */
+                g_ads_transient_balanced_latched = true;
+
+                g_debug_transient_count++;
+                g_debug_transient_balanced_count++;
+                g_debug_transient_latched = 1U;
+                g_debug_transient_balanced_latched = 1U;
+                g_debug_transient_accurate_latched = 0U;
+
+                g_active_variant = VARIANT_BALANCED;
+                g_controller_target = VARIANT_BALANCED;
+                g_controller_target_pending = false;
+                g_candidate_streak = 0U;
+                g_variant_hold_windows = 0U;
+
+                g_debug_active_variant = (uint32_t)VARIANT_BALANCED;
+                g_debug_controller_target = (uint32_t)VARIANT_BALANCED;
+                g_debug_target_pending = 0U;
+            }
+#else
+            FSP_PARAMETER_NOT_USED(transient_level);
+#endif
+
             if (g_capture_active)
             {
                 g_capture_buffer[g_capture_index] = g_adc_voltage;
@@ -616,13 +1000,13 @@ void adc_thread_entry(void *pvParameters)
                          * Training mode: pin to Fast for the whole session so every logged
                          * row is generated from the same reference model (no closed-loop
                          * feedback / no variant-identity leakage into the features).
-                         * Normal mode: unchanged meta-controller + transition policy path. */
+                         * Normal mode: trained meta-controller + temporal transition policy only. */
                         model_variant_t candidate;
     #if ARIA_META_TRAINING_MODE
                         candidate = VARIANT_FAST;        /* not used for control, kept for debug symmetry */
                         g_active_variant = VARIANT_FAST; /* pinned reference model during data collection */
     #else
-                        candidate = aria_signal_meta_candidate(
+                        candidate = aria_learned_meta_candidate(
                             g_meta_features.confidence_avg,
                             g_meta_features.confidence_trend,
                             g_meta_features.signal_delta,
@@ -630,33 +1014,71 @@ void adc_thread_entry(void *pvParameters)
                         );
 
                         /*
-                         * Applies confirmation-window / hold-window logic.
-                         * g_active_variant is now the selected state for the
-                         * next inference window.
-                        */
-                        g_active_variant = aria_apply_transition_policy(
-                            g_active_variant,
-                            candidate,
-                            g_meta_features.signal_rms
-                        );
+                         * Normal learned routing uses the hierarchical scheduler.
+                         * Transient latches have priority only until one real
+                         * inference from the requested tier completes:
+                         *
+                         *   ACCURATE latch > BALANCED latch > learned scheduler
+                         *
+                         * A strong transient may preempt BALANCED at sample time;
+                         * BALANCED never demotes an active ACCURATE latch.
+                         */
+                        if (g_ads_transient_accurate_latched)
+                        {
+                            g_active_variant = VARIANT_ACCURATE;
+
+                            if (variant_used == VARIANT_ACCURATE)
+                            {
+                                g_ads_transient_accurate_latched = false;
+                                g_debug_transient_latched = 0U;
+                                g_debug_transient_accurate_latched = 0U;
+
+                                g_controller_target = VARIANT_ACCURATE;
+                                g_controller_target_pending = false;
+                                g_candidate_streak = 0U;
+                                g_variant_hold_windows = 0U;
+                            }
+                        }
+                        else if (g_ads_transient_balanced_latched)
+                        {
+                            g_active_variant = VARIANT_BALANCED;
+
+                            if (variant_used == VARIANT_BALANCED)
+                            {
+                                g_ads_transient_balanced_latched = false;
+                                g_debug_transient_latched = 0U;
+                                g_debug_transient_balanced_latched = 0U;
+
+                                g_controller_target = VARIANT_BALANCED;
+                                g_controller_target_pending = false;
+                                g_candidate_streak = 0U;
+                                g_variant_hold_windows = 0U;
+                            }
+                        }
+                        else
+                        {
+                            g_active_variant = aria_apply_transition_policy(
+                                g_active_variant,
+                                candidate
+                            );
+                        }
     #endif
 
                         g_debug_controller_candidate = (uint32_t) candidate;
                         g_debug_active_variant = (uint32_t) g_active_variant;
                         g_debug_candidate_streak = g_candidate_streak;
                         g_debug_variant_hold_windows = g_variant_hold_windows;
+                        g_debug_controller_target = (uint32_t) g_controller_target;
+                        g_debug_target_pending = g_controller_target_pending ? 1U : 0U;
                         /*
-                         * Send telemetry ONLY after the new active state has
-                         * been chosen, so the dashboard reflects ARIA's current
-                         * selected variant.
-                        */
-                        g_debug_real_telemetry_count++;
-                        telemetry_send(
-                            variant_used,
-                            p_anomaly,
-                            (uint32_t) g_meta_features.latency_us,
-                            (float) g_adc_voltage
-                        );
+                         * Cache the result from the model that actually ran.
+                         * Live voltage telemetry is sent independently below,
+                         * so the dashboard can update without waiting for the
+                         * next inference window to complete.
+                         */
+                        g_ads_last_inference_confidence = p_anomaly;
+                        g_ads_last_inference_latency_us =
+                            (uint32_t)g_meta_features.latency_us;
                     } else {
                         /* Inference failed — do NOT update meta-features or log garbage.
                          * Force fallback to Fast so the system recovers cleanly. */
@@ -665,9 +1087,40 @@ void adc_thread_entry(void *pvParameters)
                         g_variant_hold_windows = 0U;
                         g_candidate_streak = 0U;
                         g_controller_candidate = VARIANT_FAST;
+                        g_controller_target = VARIANT_FAST;
+                        g_controller_target_pending = false;
+                        g_ads_transient_balanced_latched = false;
+                        g_ads_transient_accurate_latched = false;
+                        g_debug_transient_latched = 0U;
+                        g_debug_transient_balanced_latched = 0U;
+                        g_debug_transient_accurate_latched = 0U;
+                        g_debug_controller_target = (uint32_t)VARIANT_FAST;
+                        g_debug_target_pending = 0U;
                     }
                     g_last_inference_capture_count = g_capture_total_count;
                 }
+            }
+
+            /*
+             * Send live ADS telemetry at ~10 Hz whenever fresh ADC samples are
+             * arriving. The voltage is the newest sample. The model is the
+             * current learned-controller state; confidence and latency come
+             * from the most recent successful real inference. Telemetry does
+             * not participate in model selection.
+             */
+            TickType_t telemetry_now = xTaskGetTickCount();
+            if ((telemetry_now - g_ads_last_live_telemetry_tick) >=
+                pdMS_TO_TICKS(ADS_LIVE_TELEMETRY_PERIOD_MS))
+            {
+                g_ads_last_live_telemetry_tick = telemetry_now;
+                g_debug_real_telemetry_count++;
+
+                telemetry_send(
+                    g_active_variant,
+                    g_ads_last_inference_confidence,
+                    g_ads_last_inference_latency_us,
+                    (float)g_adc_voltage
+                );
             }
 
             uint32_t sample_t1 = benchmark_dwt_get();
@@ -678,7 +1131,7 @@ void adc_thread_entry(void *pvParameters)
             g_adc_stage = 0xE003;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(5));
 
         /* ---- Benchmark: full loop iteration timing ends here ---- */
         uint32_t loop_t1 = benchmark_dwt_get();
