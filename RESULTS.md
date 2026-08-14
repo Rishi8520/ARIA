@@ -267,15 +267,21 @@ The UART concurrency issue is solved by a static binary semaphore TX gate.
 
 ### Physical Prototype
 
-![ARIA hardware prototype — top view](./IMG_2589.jpeg)
+<img width="5712" height="4284" alt="IMG_2589 2" src="https://github.com/user-attachments/assets/3967a7f2-0abe-46bd-8083-3e628b4eee0a" />
+
 
 *Top view of the EK-RA8D1, breadboarded sensor/input circuitry, ICM-20948, ESP32 telemetry bridge, and connected development setup.*
 
 ### Live System + Dashboard
 
-![ARIA running with live dashboard](./IMG_2587.jpeg)
+<img width="5712" height="4284" alt="IMG_2587" src="https://github.com/user-attachments/assets/3d3f138d-7684-40e1-81e1-18a9d01acbcf" />
 
 *ARIA running on the physical hardware while the laptop shows the live telemetry dashboard. The dashboard is a visualization layer; inference stays on the Cortex-M85.*
+
+### Live System + Dashboard
+
+*Demo run of ARIA.*
+[Link](https://youtu.be/goghZ2gUtec)
 
 ### What Makes the Demo Stand Out
 
