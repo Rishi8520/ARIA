@@ -31,8 +31,9 @@ Submission window: June 10 to August 14, 2026 | Timeline: 6-week build, started 
 17. [How to Build and Flash](#17-how-to-build-and-flash)
 18. [Demo Script](#18-demo-script)
 19. [Toolchain, Build System and Environment](#19-toolchain-build-system-and-environment)
-20. [Submission Checklist](#21-submission-checklist)
-21. [License](#22-license)
+20. [Submission Checklist](#20-submission-checklist)
+21. [License](#21-license)
+22. [Developers](#20-developers)
 
 ---
 
@@ -1345,3 +1346,9 @@ The project is built with Cortex-M85/Helium support enabled project-wide.
 To be finalized as MIT or Apache 2.0 prior to submission, per the Arm AI Optimization Challenge 2026 submission requirements.
 
 ---
+
+## 22. Developers
+
+Sachi Patwardhan [linkedIn](https://www.linkedin.com/in/sachi-patwardhan-8a560430b/)
+Rishiraj Rakesh Kumar [GitHub](https://www.github.com/Rishi8520)
+
