@@ -1350,5 +1350,6 @@ To be finalized as MIT or Apache 2.0 prior to submission, per the Arm AI Optimiz
 ## 22. Developers
 
 Sachi Patwardhan [linkedIn](https://www.linkedin.com/in/sachi-patwardhan-8a560430b/)
+
 Rishiraj Rakesh Kumar [GitHub](https://www.github.com/Rishi8520)
 
