@@ -17,7 +17,7 @@ ARIA now demonstrates a complete on-device adaptive inference stack on the **Ren
 
 ## System Architecture
 
-![ARIA per-frame decision pipeline](./aria_pipeline_diagram.png)
+<img width="1000" height="420" alt="aria_pipeline_diagram" src="https://github.com/user-attachments/assets/6cd6d914-0296-40a4-85de-ed9c45a189d1" />
 
 *High-level ARIA skeleton. The deployed implementation keeps this common model-zoo/controller/feedback structure, while ADS and ICM use sensor-specific runtime features and event guards.*
 
@@ -25,8 +25,8 @@ The core flow is:
 
 ```text
 sensor -> runtime features -> meta controller -> model zoo -> real output
-                                      ^                    |
-                                      +------ feedback -----+
+                                      |                        |
+                                      +------ feedback --------+
 ```
 
 A key implementation result is that the model zoo is **already present in flash**. A model switch is a dispatcher decision between pre-linked graphs, not a model-loading operation.
