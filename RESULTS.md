@@ -50,12 +50,12 @@ A key implementation result is that the model zoo is **already present in flash*
 
 | Demo | Variant | Edge Impulse test accuracy | Compiled model object flash¹ | Runtime latency |
 |---|---|---:|---:|---|
-| ADS1263 | Fast | 83.3% | 3.50 KiB | measured live with DWT |
-| ADS1263 | Balanced | 89.8% | 4.93 KiB | measured live with DWT |
-| ADS1263 | Accurate | 96.3% | 15.48 KiB | measured live with DWT |
-| ICM-20948 | Fast | 90.1% | 3.87KiB | measured live with DWT |
-| ICM-20948 | Balanced | 89.1% | 4.03KiB | measured live with DWT |
-| ICM-20948 | Accurate | 98.8% | 5.30KiB | measured live with DWT |
+| ADS1263 | Fast | 83.3% | 3.50 KiB | Measured on-device with Cortex-M85 DWT |
+| ADS1263 | Balanced | 89.8% | 4.93 KiB | Measured on-device with Cortex-M85 DWT |
+| ADS1263 | Accurate | 96.3% | 15.48 KiB | Measured on-device with Cortex-M85 DWT |
+| ICM-20948 | Fast | 90.1% | 3.87KiB | Measured on-device with Cortex-M85 DWT |
+| ICM-20948 | Balanced | 89.1% | 4.03KiB | Measured on-device with Cortex-M85 DWT |
+| ICM-20948 | Accurate | 98.8% | 5.30KiB | Measured on-device with Cortex-M85 DWT |
 
 ¹ Compiled model object flash contribution calculated as `text + data` from the individual linked `.o` files using `arm-none-eabi-size`. This is more representative of the compiled firmware contribution than generated C/C++ source-file size, but it does not include all shared Edge Impulse/TFLM/CMSIS runtime code used by the models.
 

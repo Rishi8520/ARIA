@@ -373,18 +373,20 @@ This is especially useful for embedded systems because it makes model switching 
 
 ### 6.6 Benchmark / Model-Zoo Results
 
-| Demo | Variant | Edge Impulse test accuracy | Compiled source-size proxy¹ | Runtime latency |
-|---|---|---:|---:|---|
-| Demo 1 (ADS1263) | Fast | 83.3% | 27.3 KB | DWT-measured live |
-| Demo 1 (ADS1263) | Balanced | 89.8% | 35.3 KB | DWT-measured live |
-| Demo 1 (ADS1263) | Accurate | 96.3% | 75.8 KB | DWT-measured live |
-| Demo 2 (ICM-20948) | Fast | 90.1% | not reported here | DWT-measured live |
-| Demo 2 (ICM-20948) | Balanced | 89.1% | not reported here | DWT-measured live |
-| Demo 2 (ICM-20948) | Accurate | 98.8% | not reported here | DWT-measured live |
+All six deployed model variants have been measured from the actual compiled
+object files using `arm-none-eabi-size`. Runtime inference latency is measured
+on-device using the Cortex-M85 DWT cycle counter rather than hardcoded values.
 
-¹ For ADS, the listed size is the combined generated `.cpp` + `.h` source size used as a relative complexity proxy. It is **not** a linker-verified per-model flash allocation.
+Key deployment result:
 
-The latency displayed by ARIA is not a table constant. It is measured around the model that actually ran using the Cortex-M85 DWT cycle counter, preserved in microseconds, and transmitted to the dashboard as both `latency_us` and decimal `latency_ms`. This means the dashboard demonstrates the real compute-cost change when ARIA switches model tiers rather than showing a pre-filled benchmark number.
+- **6 model graphs resident simultaneously in one firmware image**
+- **~37.11 KiB combined direct compiled model-object flash contribution**
+- **~288.6 KiB total linked firmware flash content**
+- No runtime model loading, reflashing, or cloud inference is required when
+  switching between Fast, Balanced, and Accurate.
+
+See **[result.md](./result.md)** for the complete per-model accuracy, compiled
+size, runtime benchmark results, and hardware evidence.
 
 ## 7. Meta-Controller Design
 
