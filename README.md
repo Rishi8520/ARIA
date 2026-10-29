@@ -1345,7 +1345,7 @@ The project is built with Cortex-M85/Helium support enabled project-wide.
 
 ## 21. License
 
-To be finalized as MIT or Apache 2.0 prior to submission, per the Arm AI Optimization Challenge 2026 submission requirements.
+Apache 2.0, as per the Arm AI Optimization Challenge 2026 submission requirements.
 
 ---
 
